@@ -4,6 +4,9 @@ import           Data.List            (intersperse)
 import           Data.Word            (Word16)
 import           Data.Bits            ((.&.), (.|.), complement)
 import qualified Data.ByteString as B (ByteString, getContents, unpack)
+import qualified Data.Vector     as V (Vector, fromList, toList, replicate,
+                                       take, drop, (++), (!), (//))
+
 
 data Instruction = HALTcode
                  | SETcode Word16 Word16
@@ -35,7 +38,7 @@ newtype Program = Program { getInstructions :: [Word16] }
 type ProgCounter = Word16
 type Registers = [Word16]
 type Stack = [Word16]
-type Memory = [Word16]
+type Memory = V.Vector Word16
 
 data Runtime = Runtime {
   getPC :: ProgCounter,
@@ -59,9 +62,14 @@ main = do
   runProg $ parseWords input
 
 runProg :: Program -> IO ()
-runProg prog = execProg $ Runtime 0 regs [] mem
-  where regs = replicate numRegs 0
-        mem  = take (fromIntegral (maxValue + 1)) (getInstructions prog ++ repeat 0)
+runProg prog
+  | length code > maxm  = putStrLn "Code does not fit in memory."
+  | otherwise           = execProg $ Runtime 0 regs [] mem
+  where maxm = fromIntegral (maxValue + 1)
+        code = getInstructions prog
+        free = max 0 (maxm - length code)
+        regs = replicate numRegs 0
+        mem  = V.fromList code V.++ V.replicate free (0 :: Word16)
 
 parseWords :: B.ByteString -> Program
 parseWords xs = Program $ combine (B.unpack xs)
@@ -80,7 +88,7 @@ execProg rt@(Runtime pc _ _ mem) =
     Just i            -> execInstr rt i >>= execProg
 
 fetchInstr :: ProgCounter -> Memory -> Maybe Instruction
-fetchInstr pc = matchInstr . drop (fromIntegral pc)
+fetchInstr pc = matchInstr . V.toList . V.take 4  . V.drop (fromIntegral pc)
 
 matchInstr :: [Word16] -> Maybe Instruction
 matchInstr []            = Nothing
@@ -173,12 +181,11 @@ condJumpInstr (Runtime pc rs st mem) truth b = Runtime pc' rs st mem
 
 rmemInstr :: Runtime -> Word16 -> Word16 -> Runtime
 rmemInstr (Runtime pc rs st mem) a b = Runtime (pc + 3) rs' st mem
-  where rs' = updateRegs rs a (mem !! fromIntegral b)
+  where rs' = updateRegs rs a (mem V.! fromIntegral b)
 
 wmemInstr :: Runtime -> Word16 -> Word16 -> Runtime
 wmemInstr (Runtime pc rs st mem) a b = Runtime (pc + 3) rs st mem'
-  where idx  = fromIntegral a
-        mem' = take idx mem ++ b : drop (idx + 1) mem
+  where mem' = mem V.// [(fromIntegral a, b)]
 
 callInstr :: Runtime -> Word16 -> Runtime
 callInstr (Runtime pc rs st mem) a = Runtime a rs (pc + 2 : st) mem
