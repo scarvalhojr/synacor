@@ -1,9 +1,11 @@
 
-import           Data.Char            (chr)
+import           Data.Char            (chr, ord)
 import           Data.List            (intersperse)
 import           Data.Word            (Word16)
 import           Data.Bits            ((.&.), (.|.), complement)
-import qualified Data.ByteString as B (ByteString, getContents, unpack)
+import           System.IO            (openFile, IOMode(ReadMode))
+import           System.Environment   (getArgs)
+import qualified Data.ByteString as B (ByteString, hGetContents, unpack)
 import qualified Data.Vector     as V (Vector, fromList, toList, replicate,
                                        take, drop, (++), (!), (//))
 
@@ -33,8 +35,7 @@ data Instruction = HALTcode
                  | UNKNcode Word16
   deriving (Eq, Show)
 
-newtype Program = Program { getInstructions :: [Word16] }
-
+type Program = [Word16]
 type ProgCounter = Word16
 type Registers = [Word16]
 type Stack = [Word16]
@@ -58,21 +59,24 @@ maxReg = maxValue + fromIntegral numRegs
 
 main :: IO ()
 main = do
-  input <- B.getContents
-  runProg $ parseWords input
+  args <- getArgs
+  case args of
+    []     -> putStrLn "Usage: synacor <program binary file>"
+    (a:as) -> do file <- openFile a ReadMode
+                 input <- B.hGetContents file
+                 runProg $ parseProg input
 
 runProg :: Program -> IO ()
 runProg prog
-  | length code > maxm  = putStrLn "Code does not fit in memory."
+  | length prog > maxm  = putStrLn "Code does not fit in memory."
   | otherwise           = execProg $ Runtime 0 regs [] mem
-  where maxm = fromIntegral (maxValue + 1)
-        code = getInstructions prog
-        free = max 0 (maxm - length code)
-        regs = replicate numRegs 0
-        mem  = V.fromList code V.++ V.replicate free (0 :: Word16)
+  where regs = replicate numRegs 0
+        maxm = fromIntegral (maxValue + 1)
+        free = max 0 (maxm - length prog)
+        mem  = V.fromList prog V.++ V.replicate free (0 :: Word16)
 
-parseWords :: B.ByteString -> Program
-parseWords xs = Program $ combine (B.unpack xs)
+parseProg :: B.ByteString -> Program
+parseProg xs = combine (B.unpack xs)
   where combine []         = []
         combine [x]        = [fromIntegral x]
         combine (x1:x2:xs) = combine' x1 x2 : combine xs
@@ -88,7 +92,7 @@ execProg rt@(Runtime pc _ _ mem) =
     Just i            -> execInstr rt i >>= execProg
 
 fetchInstr :: ProgCounter -> Memory -> Maybe Instruction
-fetchInstr pc = matchInstr . V.toList . V.take 4  . V.drop (fromIntegral pc)
+fetchInstr pc = matchInstr . V.toList . V.drop (fromIntegral pc)
 
 matchInstr :: [Word16] -> Maybe Instruction
 matchInstr []            = Nothing
@@ -112,7 +116,7 @@ matchInstr (16:a:b:xs)   = Just (WMEMcode a b)
 matchInstr (17:a:xs)     = Just (CALLcode a)
 matchInstr (18:xs)       = Just (RETcode)
 matchInstr (19:a:xs)     = Just (OUTcode a)
--- matchInstr (20:a:xs)     = Just (INcode a)
+matchInstr (20:a:xs)     = Just (INcode a)
 matchInstr (21:xs)       = Just (NOOPcode)
 matchInstr (x:xs)        = Just (UNKNcode x)
 
@@ -138,10 +142,13 @@ execInstr rt@(Runtime pc rs st mem) inst =
     CALLcode a     -> return $ callInstr rt (eval a)
     RETcode        -> return $ retInstr rt
     OUTcode  a     -> outInstr rt (eval a)
+    INcode   a     -> inInstr rt a
     NOOPcode       -> return $ Runtime (pc + 1) rs st mem
+    _              -> error $ "ERROR: invalid instruction code: " ++ show inst
   where eval x
           | x <= maxValue  = x
           | x <= maxReg    = rs !! fromIntegral (x - maxValue - 1)
+          | otherwise      = undefined -- TODO handle invalid values
 
 setReg :: Runtime -> Word16 -> Word16 -> Word16 -> Runtime
 setReg (Runtime pc rs st mem) a val jump = Runtime (pc + jump) rs' st mem
@@ -150,6 +157,7 @@ setReg (Runtime pc rs st mem) a val jump = Runtime (pc + jump) rs' st mem
 updateRegs :: Registers -> Word16 -> Word16 -> Registers
 updateRegs rs r x
   | i >= 0 && i < numRegs  = take i rs ++ x : drop (i + 1) rs
+  | otherwise              = undefined -- TODO handle invalid register number
   where i = fromIntegral (r - maxValue - 1)
 
 addOpr :: Word16 -> Word16 -> Word16
@@ -197,3 +205,20 @@ outInstr :: Runtime -> Word16 -> IO Runtime
 outInstr (Runtime pc rs st mem) a = do
   putChar $ chr (fromIntegral a)
   return $ Runtime (pc + 2) rs st mem
+
+inInstr :: Runtime -> Word16 -> IO Runtime
+inInstr rt@(Runtime pc rs st mem) a = do
+  ch <- getChar
+  case ch of
+    '$' -> inInstr (secretInjection rt) a
+    _   -> do let code = fromIntegral (ord ch)
+              return $ Runtime (pc + 2) (updateRegs rs a code) st mem
+
+-- Inject code to bypass teleporter check, stolen from
+-- https://github.com/lux01/synacor
+secretInjection :: Runtime -> Runtime
+secretInjection (Runtime pc rs st mem) = Runtime pc rs st mem'
+  where mem' = mem V.// [ (5451, 1), (5452, 32775), (5453, 25734)
+                        , (5483, 1), (5484, 32768), (5485, 6), (5486, 21)
+                        , (5487, 21), (5488, 21), (5489, 21), (5490, 21)
+                        ]
